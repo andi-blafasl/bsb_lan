@@ -11,7 +11,7 @@
  * http://192.168.1.50/1234/8700/8740/8741  - to list parameters 8700, 8740 and 8741 in one request
 */
 
-#define PASSKEY  "1234"
+#define PASSKEY  "2712"
 
 /* select your heating system (default may work for other systems) */
 
@@ -27,20 +27,20 @@
 //#define ONE_WIRE_BUS 3
 
 // Activate DHT temperature/humidity sensors
-#define DHT_BUS 2,3
+//#define DHT_BUS 2,3
 
 /*
  *  Enter a MAC address and IP address for your controller below.
  *  The IP address will be dependent on your local network:
 */
-byte mac[] = { 0x00, 0x80, 0x41, 0x19, 0x69, 0x90 };
+byte mac[] = { 0x8A, 0x27, 0x12, 0xBE, 0xEF, 0x00 };
 
 /*
  * Initialize the Ethernet server library
  * with the IP address and port you want to use
  * (port 80 is default for HTTP):
 */
-IPAddress ip(192,168,1,50);
+IPAddress ip(192,168,81,19);
 EthernetServer server(80);
 
 // Software Serial needs special pins for RX: 10-13, 50-53, 62(A8)-69(A15)
