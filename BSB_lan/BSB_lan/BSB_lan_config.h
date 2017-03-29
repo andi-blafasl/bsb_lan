@@ -17,14 +17,14 @@
 
 //#define THISION
 //#define FUJITSU          // for FUJITSU Wärmepumpe
-//#define BROETJE_SOB
+#define BROETJE_SOB
 //#define PROGNR_5895      // if we know more about this command
 //#define PROGNR_6030      // if we know more about this command
 
 /*
  * Define the pin for one wire temperature sensors
 */
-//#define ONE_WIRE_BUS 3
+#define ONE_WIRE_BUS 3
 
 // Activate DHT temperature/humidity sensors
 //#define DHT_BUS 2,3
@@ -79,7 +79,7 @@ unsigned long log_interval = 3600;    // logging interval in seconds
 boolean log_unknown_only = 1;         // should we log only unknown commands when logging bus telegrams?
 
 // Activate IPWE extension (http://xxx.xxx.xxx.xxx/ipwe.cgi)
-#define IPWE
+// #define IPWE
 
 // Parameters to be displayed in IPWE extension
 int ipwe_parameters[] = {
