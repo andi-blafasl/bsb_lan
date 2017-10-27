@@ -3,8 +3,10 @@ BSB Boiler-System-Bus LAN Interface
 ATTENTION:  
       There is no waranty that this system will not damage your heating system!
 
-Author: Gero Schumacher (gero.schumacher@gmail.com)  
-      Based on the code and work from many other developers (see Info section below). Many thanks!
+Authors:  
+Gero Schumacher (gero.schumacher ät gmail.com) (up to version 0.16)  
+Frederik Holst (bsb ät code-it.de) (from version 0.17 onwards)  
+Based on the code and work from many other developers (see Info section below). Many thanks!
 
 License:
       You are free to use this software on your own risk. Please take care of the licenses of the used libraries and software.
@@ -12,7 +14,7 @@ License:
 Host System:  
 The software is designed to run on an arduino mega2560 board with ethernet shield.
 Because there are different pin assignments for different ethernet shields, you
-may have to connect the BSB adapter to different pins and to change the pin assigment
+may have to connect the BSB-LPB adapter to different pins and to change the pin assigment
 in the software.  
 The software is tested with the following components:        
 - SainSmart MEGA2560 R3 Development Board  
@@ -25,7 +27,7 @@ Target System:
       Communication should be possible with all systems that support the BSB interface. 
 
 Getting started:
-* Connect the CL+ and CL- connectors of the interface to the corresponding port of your heating system (look out for port names like BSB, FB, CL+/CL-, remote control).
+* Connect the CL+ and CL- connectors of the interface to the corresponding port of your heating system (look out for port names like BSB, FB, CL+/CL-, remote control). For LPB, connect with DB/MB (connect DB(+) to CL+ and MB(-) to CL-).
 * Download and install the most recent version of the Arduino IDE from https://www.arduino.cc/en/Main/Software (Windows, Mac and Linux are available).
 * <del>Copy the contents of the BSB_lan libraries folder into your local Arduino libraries folder (My Documents\Arduino\libraries\ on Windows, ~/Documents/Arduino/libraries on Mac).</del> No longer necessary from version 0.34 onwards.
 * Open the BSB_lan sketch by double-clicking on the BSB_lan.ino file in the BSB_lan folder. The corresponding BSB_lan_config.h and BSB_lan_defs.h files will be automatically loaded as well.
@@ -38,18 +40,28 @@ Getting started:
 * Open `http://<ip address from config>/` (or `http://<ip address from config>/<passkey>/` when using the passkey function, see below) to see if everything was compiled and uploaded correctly. A simple web-interface should appear.
 
 Optionally configure the following parameters in BSB_lan_config.h:  
+- Heating system configuration  
+  `int fixed_device_id = 0;`  
+  Set this to 0 to turn on auto-detection at startup of the Arduino or enter value of parameter 6225 here.
+  A fixed value will ensure that BSB_LAN works correctly even if the heating system was turned on after the Arduino (in which case of course BSB_LAN cannot detect the heating system).
 - MAC address of your ethernet shield. It can be normally found on a label at the shield:  
   `byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xEA };`  
-- You only need to change the default IP- and MAC-address when using more than one interface in the same network.
+  You only need to change the default MAC-address when using more than one interface in the same network.
+- IP-Address  
+  `IPAddress ip(192,168,178,88);`  
 - Ethernet port  
   `EthernetServer server(80);`  
-- Pin assigment of the BSB adapter  
-  `BSB bus(68,69);`  
+- Adapter configuration  
+  `BSB bus(68,69,<my_addr>,<dest_addr>);`  
+  RX-Pin, TX-Pin, own bus address (defaults to 0x06=RGT1), destination bus address (defaults to 0x00=heating system)
+  If you already have an RGT1 installed, you can type in the following to address the adapter as RGT2:  
+  `BSB bus(68,69,7);`
+  
+- Bus protocol  
+  `uint8_t bus_type = bus.setBusType(<type>);`  
+  Default is 0 for BSB, change here to 1 for LPB or use URL command /P0 and /P1 to temporarily switch accordingly.  
 - Activate the usage of the passkey functionality (see below)  
   `#define PASSKEY  "1234"`  
-- BSB address (default is 0x06=RGT1, but can be overwritten in the bus initialization)  
-  `BSB bus(68,69,<my_addr>);`
-  If you already have an RGT1 installed, you can type in the following to address the adapter as RGT2: `BSB bus(68,69,7);`
 - You can restrict access to the adapter to read-only, so that you can not set or change certain parameters of the heater itself by accessing it via the adapter. To achieve this, you have to set the flag in the concerning line (#define DEFAULT_FLAG 0) to FL_RONLY:  
   `#define DEFAULT_FLAG FL_RONLY;`
 - You can set the language of the webinterface of the adapter to english by deactivating the concerning definement:
@@ -110,6 +122,9 @@ Web-Interface:
         http://<ip-of-server>/I<x>=<v>
         Some values cannot be set directly. The heating system is informed by a TYPE_INF message, e.g. the room temp:
         http://<ip-of-server>/I10000=19.5  // room temperature is 19.5 degree.
+        
+      Set bus protocol to BSB (x=0) or LPB (x=1)
+        http://<ip-of-server>/P<x>
 
       Set verbosity level n
         http://<ip-of-server>/V<n>
@@ -170,6 +185,10 @@ Web-Interface:
         Use /D0 to reset datalog.txt including writing a proper CSV file header 
         (recommended on first use before logging starts).
 
+      Set bus type (temporarily)
+        http://<ip-of-server>/Px
+        Switches between BSB (x=0) and LPB bus (x=1). Use setBusType config option in BSB_lan_config.h to set bus type permanently.
+
       Reset Arduino
         http://<ip-of-server>/X
         Resets the Arduino after pausing for 8 seconds (#define RESET in BSB_lan_config.h).
@@ -189,8 +208,6 @@ Open issues
 
 - Introduce valid ranges for parameters
           To make the access safer when setting values for parameters, the valid ranges should be added to the command table
-
-- Test and maybe extend the system to work with LPB instead of BSB.
 
 - Decode DE telegrams. Maybe they contain some status information and we can use them without querying.
 

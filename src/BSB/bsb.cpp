@@ -8,24 +8,42 @@
 
 #define DEBUG_LL 0
 
+extern int bus_type;
+
 // Constructor
-BSB::BSB(uint8_t rx, uint8_t tx, uint8_t addr) {
+BSB::BSB(uint8_t rx, uint8_t tx, uint8_t addr, uint8_t d_addr) {
   serial = new BSBSoftwareSerial(rx, tx, true);
 
   serial->begin(4800);
   serial->listen();
   myAddr=addr;
+  destAddr=d_addr;
 }
+
+uint8_t BSB::setBusType(uint8_t bus_type_val) {
+  bus_type = bus_type_val;
+  if (bus_type == 1) {
+    len_idx = 1;
+  } else {
+    len_idx = 3;
+  }
+  return bus_type;
+}
+
+uint8_t BSB::getBusType() {
+  return bus_type;
+}
+
 
 // Dumps a message to Serial
 void BSB::print(byte* msg) {
   //if (msg[0] != 0xDC) return;
-  byte len = msg[3];
-  //if (len > 30) return;
+  byte len = msg[len_idx];
+ //if (len > 30) return;
   byte data = 0;
 
-  for (; len > 0; len--) {
-    data = msg[msg[3]-len];
+  for (; len > 0-bus_type; len--) {	// msg length counts from zero with LPB (bus_type 1) and from 1 with BSB (bus_type 0)
+    data = msg[msg[len_idx]-len];
     if (data < 16) Serial.print("0");
     Serial.print(data, HEX);
     Serial.print(" ");
@@ -33,9 +51,8 @@ void BSB::print(byte* msg) {
   Serial.println();
 }
 
-
 // Receives a message and stores it to buffer
-void BSB::Monitor(byte* msg) {
+boolean BSB::Monitor(byte* msg) {
   unsigned long int ts;
   byte read;
   byte i=0;
@@ -71,7 +88,9 @@ void BSB::Monitor(byte* msg) {
       if (serial->available() == 0) break;
     }
     Serial.println();
+    return true;
   }
+  return false;
 }
 
 bool BSB::GetMessage(byte* msg) {
@@ -91,8 +110,8 @@ bool BSB::GetMessage(byte* msg) {
     Serial.print(" ");
 #endif    
     
-    // ... until SOF detected (= 0xDC)
-    if (read == 0xDC || read == 0xDE) {
+    // ... until SOF detected (= 0xDC, 0xDE bei BSB bzw. 0x78 bei LPB)
+    if ((bus_type == 0 && (read == 0xDC || read == 0xDE)) || (bus_type == 1 && read == 0x78)) {
       // Restore otherwise dropped SOF indicator
       msg[i++] = read;
 
@@ -111,10 +130,10 @@ bool BSB::GetMessage(byte* msg) {
         Serial.print(" ");
 #endif
         // Break if message seems to be completely received (i==msg.length)
-        if (i > 3){
-          if ( msg[3] > 32 ) // check for maximum message length
+        if (i > len_idx){
+          if ( msg[len_idx] > 32 ) // check for maximum message length
             break;
-          if (i >= msg[3])
+          if (i >= msg[len_idx]+bus_type)
             break;
         }
         // Delay until we got next byte
@@ -131,11 +150,16 @@ bool BSB::GetMessage(byte* msg) {
         // DO NOT break because some messages contain a 0xDC 
       }
 
-      // We should have read the message completly. Now check and return
-      if (i == msg[3]) {
+      // We should have read the message completely. Now check and return
+      if (i == msg[len_idx]+bus_type) {		// LPB msg length is one less than BSB
         // Seems to have received all data
-        if (CRC(msg, i) == 0) return true;
-        else return false;
+	if (bus_type == 1) {
+          if (CRC_LPB(msg, i-1)-msg[i-2]*256-msg[i-1] == 0) return true;
+          else return false;
+	} else {
+          if (CRC(msg, i) == 0) return true;
+          else return false;
+	}
       }
       else {
         // Length error
@@ -148,7 +172,7 @@ bool BSB::GetMessage(byte* msg) {
   return false;
 }
 
-// Generates CCITT XMODEM CRC from message
+// Generates CCITT XMODEM CRC from BSB message
 uint16_t BSB::CRC (byte* buffer, uint8_t length) {
   uint16_t crc = 0, i;
 
@@ -161,50 +185,83 @@ uint16_t BSB::CRC (byte* buffer, uint8_t length) {
   return crc;
 }
 
+// Generates checksum from LPB message
+// (255 - (Telegrammlänge ohne PS - 1)) * 256 + Telegrammlänge ohne PS - 1 + Summe aller Telegrammbytes
+uint16_t BSB::CRC_LPB (byte* buffer, uint8_t length) {
+  uint16_t crc = 0;
+  uint8_t i;
+
+  crc = (257-length)*256+length-2;
+
+  for (i = 0; i < length-1; i++) {
+    crc = crc+buffer[i];
+  }
+
+  return crc;
+}
+
 // Low-Level sending of message to bus
 inline bool BSB::_send(byte* msg) {
 // Nun - Ein Teilnehmer will senden :
   byte i;
   byte data;
-  byte len = msg[3];
-  msg[0] = 0xDC;
-  msg[1] = myAddr | 0x80;
-  msg[2] = 0x00;
+  byte len = msg[len_idx];
+
+  if (bus_type == 1) {
+    msg[0] = 0x78;
+    msg[2] = destAddr;
+    msg[3] = myAddr;
+  } else {
+    msg[0] = 0xDC;
+    msg[1] = myAddr | 0x80;
+    msg[2] = 0x00;
+  }
 
   {
-    uint16_t crc = CRC (msg, len -2);
-    msg[len -2] = (crc >> 8);
-    msg[len -1] = (crc & 0xFF);
+    if (bus_type == 1) {
+      uint16_t crc = CRC_LPB (msg, len);
+      msg[len-1] = (crc >> 8);
+      msg[len] = (crc & 0xFF);
+    } else {
+      uint16_t crc = CRC (msg, len -2);
+      msg[len -2] = (crc >> 8);
+      msg[len -1] = (crc & 0xFF);
+    }
   }
 #if DEBUG_LL  
   print(msg);
 #endif  
   /*
-Er wartet 10/4800 Sek ab, lauscht und schaut ob der Bus in dieser Zeit
-von jemand anderem benutzt wird. Sprich ob der Bus in dieser Zeit mal
+Er wartet 11/4800 Sek ab (statt 10, Hinweis von miwi), lauscht und schaut ob der Bus in dieser Zeit von jemand anderem benutzt wird. Sprich ob der Bus in dieser Zeit mal
 auf 0 runtergezogen wurde. Wenn ja - mit den warten neu anfangen.
 */
-  unsigned long timeoutabort = millis() + 1000;
-retry:
-  {
-    if(millis() > timeoutabort){
+  unsigned long timeoutabort = millis() + 1000;  // one second timeout
+  retry:
+  // Select a random wait time between 60 and 79 ms
+  unsigned long waitfree = random(1,60) + 25; // range 26 .. 85 ms
+//  unsigned long waitfree = random(1,20) + 59; // range 60 .. 79 ms
+  { // block begins
+    if(millis() > timeoutabort){  // one second has elapsed
       return false;
     }
-    unsigned long timeout = millis() + 3;//((1/480)*1000);
+    // Wait 59 ms plus a random time
+    unsigned long timeout = millis() + waitfree;
+//    unsigned long timeout = millis() + 3;//((1/480)*1000);
     while (millis() < timeout) {
       if ( serial->rx_pin_read()) // inverse logic
       {
         goto retry;
-      }
-    }
-  }
+      } // endif
+    } // endwhile
+  } // block ends
+
   //Serial.println("bus free");
 
 /*
 Wenn nicht wird das erste Bit gesendet. ( Startbit )
 
 Jedes gesendete Bit wird ( wegen Bus ) ja sofort auf der Empfangsleitung
-wieder ankommen. Man schaut nach, ob das gesendetet Bit mit dem
+wieder ankommen. Man schaut nach, ob das gesendete Bit mit dem
 empfangenen Bit übereinstimmt.
 Wenn ich eine "0" sende - also den Bus auf High lasse, dann will ich
 sehen, dass der Bus weiterhin auf High ist. Sollte ein anderer
@@ -215,7 +272,7 @@ und Stop Bit.
 */
 
   cli();
-  for (i=0; i < msg[3]; i++) {
+  for (i=0; i < msg[len_idx]+bus_type; i++) {	// same msg length difference as above
     data = msg[i] ^ 0xFF;
     if (serial->write(data) != 1) {
       // Collision
@@ -236,20 +293,38 @@ bool BSB::Send(uint8_t type, uint32_t cmd, byte* rx_msg, byte* tx_msg, byte* par
   byte A3 = (cmd & 0x0000ff00) >> 8;
   byte A4 = (cmd & 0x000000ff);
   
-  tx_msg[3] = param_len + 11;
-  tx_msg[4] = type;
-  // Adress
-  tx_msg[5] = A1;
-  tx_msg[6] = A2;
-  tx_msg[7] = A3;
-  tx_msg[8] = A4;
+  if (bus_type == 1) {
+    tx_msg[1] = param_len + 14;
+    tx_msg[4] = 0xC0;	// some kind of sending/receiving flag?
+    tx_msg[5] = 0x02;	// yet unknown
+    tx_msg[6] = 0x00;	// yet unknown
+    tx_msg[7] = 0x14;	// yet unknown
+    tx_msg[8] = type;
+    // Adress
+    tx_msg[9] = A1;
+    tx_msg[10] = A2;
+    tx_msg[11] = A3;
+    tx_msg[12] = A4;
+  } else {
+    tx_msg[3] = param_len + 11;
+    tx_msg[4] = type;
+    // Adress
+    tx_msg[5] = A1;
+    tx_msg[6] = A2;
+    tx_msg[7] = A3;
+    tx_msg[8] = A4;
+  }
 
   // Value
-  for (i=0; i < param_len; i++)
-    tx_msg[9+i] = param[i];
-  
-  if(!_send(tx_msg)) return false;
+  for (i=0; i < param_len; i++) {
+    if (bus_type == 1) {
+      tx_msg[13+i] = param[i];
+    } else {
+      tx_msg[9+i] = param[i];
+    }
+  }
 
+  if(!_send(tx_msg)) return false;
   if(!wait_for_reply) return true;
 
   i=15;
@@ -258,8 +333,19 @@ bool BSB::Send(uint8_t type, uint32_t cmd, byte* rx_msg, byte* tx_msg, byte* par
   while ((i > 0) && (millis() < timeout)) {
     if (GetMessage(rx_msg)) {
       i--;
-      if ((rx_msg[2] == myAddr) && (rx_msg[5] == A2) && (rx_msg[6] == A1) && (rx_msg[7] == A3) && (rx_msg[8] == A4)) {
-        return true;
+      if (bus_type == 1) {
+/* Activate for LPB systems with truncated error messages (no commandID in return telegram) 
+	if (rx_msg[2] == myAddr && rx_msg[8]==0x08) {  // TYPE_ERR
+	  return false;
+	}
+*/
+        if (rx_msg[2] == myAddr && rx_msg[9] == A2 && rx_msg[10] == A1 && rx_msg[11] == A3 && rx_msg[12] == A4) {
+          return true;
+	}
+      } else {
+        if ((rx_msg[2] == myAddr) && (rx_msg[5] == A2) && (rx_msg[6] == A1) && (rx_msg[7] == A3) && (rx_msg[8] == A4)) {
+          return true;
+	}
       }
     }
     else {

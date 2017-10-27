@@ -37,17 +37,23 @@ typedef struct
 class BSB
 {
 public:
-  BSB(uint8_t rx, uint8_t tx, uint8_t addr=0x06 );
-  void Monitor(byte* msg);
+  BSB(uint8_t rx, uint8_t tx, uint8_t addr=0x06, uint8_t d_addr=0x00 );
+  boolean Monitor(byte* msg);
   bool GetMessage(byte* msg);
   void print(byte* msg);
+  uint8_t setBusType(uint8_t bus_type_val);
+  uint8_t getBusType();
 
   bool Send(uint8_t type, uint32_t cmd, byte* rx_msg, byte* tx_msg, byte* param=NULL, byte param_len=0, bool wait_for_reply=true);
 
 private:
   uint8_t myAddr;
+  uint8_t destAddr;
+  uint8_t bus_type = 0;
+  uint8_t len_idx = 3;
   inline bool _send(byte* msg);
   uint16_t CRC (byte* buffer, uint8_t length);
+  uint16_t CRC_LPB (byte* buffer, uint8_t length);
 
   BSBSoftwareSerial* serial;
 };

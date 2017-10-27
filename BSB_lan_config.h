@@ -46,10 +46,10 @@ EthernetServer server(80);
 //#define USER_PASS_B64 "YXRhcmk6ODAweGw="
 
 /* select your heating system (default may work for other systems)
- * Set device_id to your device family (parameter 6225) here if autodetect does not work or heating system is not running when Arduino is powered on
+ * Set fixed_device_id to your device family (parameter 6225) here if autodetect does not work or heating system is not running when Arduino is powered on
  * You may use other device family numbers to test commands from other heating systems at your own risk
 */
-int device_id = 0;
+int fixed_device_id = 0;
 
 /* display web interface in German language; remove definement for English */
 #define LANG_DE
@@ -81,7 +81,7 @@ int log_parameters[20] = {
 //  20002,                  // Spezialparameter: TWW-Laufzeit (/B)
 //  20003,                  // Spezialparameter: TWW-Takte (/B)
 //  20004,                  // Spezialparameter: 24h-Durchschnittswerte (/A)
-//  20101,                  // Spezialparameter 20100-20099: DHT22-Sensoren 1-100 (/H)
+//  20101,                  // Spezialparameter 20100-20199: DHT22-Sensoren 1-100 (/H)
 //  20200                   // Spezialparameter 20200-20299: DS18B20-Sensoren 1-100 (/T)
 };
 
@@ -120,8 +120,14 @@ byte mac[] = { 0x8A, 0x27, 0x12, 0xBE, 0xEF, 0x00 };
 
 // Software Serial needs special pins for RX: 10-13, 50-53, 62(A8)-69(A15)
 // W5100 ethernet shield uses the following pins: 10, 50-53
-// use BSB bus(68,69,7) to define device as RGT2
+// BSB: 
+// - third parameter sets own address, defaults to RGT1 (0x06)
+// - use BSB bus(68,69,7) to define device as RGT2
+// LPB: 
+// - third and fourth parameter set own and destination address (high nibble = segment, low nibble = device minus 1)
+// - defaults to 0x06 for own address and 0x00 for destination address, i.e. segment 0, device 7 for Arduino and segment 0, device 1 for heating system
 BSB bus(68,69);
+uint8_t bus_type = bus.setBusType(0);  // set bus system at boot: 0 = BSB, 1 = LPB
 
 // Protect these pins from accidental GPIO access
 byte exclude_GPIO[] = {10, 11, 12, 13, 50, 51, 52, 53, 62, 63, 64, 65, 66, 67, 68, 69};

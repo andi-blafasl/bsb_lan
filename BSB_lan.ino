@@ -1,4 +1,4 @@
-char version[] = "0.35";
+char version[] = "0.38";
 
 /*
  * 
@@ -9,7 +9,7 @@ char version[] = "0.35";
  *
  * Author: Gero Schumacher (gero.schumacher@gmail.com) (up to version 0.16)
  *         Frederik Holst (bsb@code-it.de) (from version 0.17 onwards)
- *        (based on the code and work from many other developers. Many thanks!)
+ *         (based on the code and work from many other developers. Many thanks!)
  *
  * see README and HOWTO files for more information
  *
@@ -48,8 +48,18 @@ char version[] = "0.35";
  *       0.33  - 09.05.2017
  *       0.34  - 29.05.2017
  *       0.35  - 25.06.2017
+ *       0.36  - 23.08.2017
+ *       0.37  - 08.09.2017
+ *       0.38  - 09.09.2017
  *
  * Changelog:
+ *       version 0.38
+ *        - Bugfixing SD-card logging in monitor mode
+ *        - Added Brötje BOB device family (138)
+ *       version 0.37
+ *        - LPB implementation! More than 450 parameters supported! Switch temporarily between LPB and BSB with the Px command (0=BSB, 1=LPB) or use the setBusType config option to set bus-type at boot-time. Parameter numbers are the same as for BSB.
+ *       version 0.36
+ *        - bugfix: brought back VT_BIT list of options which were erroneously deleted :(, fixed/freed several memory issues
  *       version 0.35
  *        - new category "Sitherm Pro"; caution: category numbers all move up by one, starting from category "Wärmepumpe" (from 20 to 21) onwards.
  *        - graph display of logging data now comes with crosshair and shows detailed values as tooltip
@@ -90,7 +100,7 @@ char version[] = "0.35";
  *        - new URL-command /LB=x to log only broadcast messages (x=1) or all bus messages (x=0)
  *        - new URL-command /X to reset the Arduino (need to enable RESET definement in BSB_lan_config.h)
  *        - new logging parameters 20002 and 20003 for hot water loading times and cycles
- *        - moved DS18B20 logging parameters from 20010-20019 to 20100-20199 and DHT22 logging parameters from 20020-20029 to 20200 to 20299
+ *        - moved DS18B20 logging parameters from 20010-20019 to 20200-20299 and DHT22 logging parameters from 20020-20029 to 20100 to 20199
  *        - moved average logging parameter from 20002 to 20004
  *        - set numerous parameters to read-only because that's what they obviously are (K33-36)
  *        - various bugfixes
@@ -225,7 +235,6 @@ char version[] = "0.35";
  *
  */
 
-
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
 #include <SPI.h>
@@ -244,6 +253,9 @@ char version[] = "0.35";
 #ifdef TRUSTED_IP
 #include <utility/w5100.h>        // change to w5500.h for W5500 type ethernet shields
 #endif
+
+uint8_t len_idx, pl_start;
+int device_id;
 
 EthernetClient client;
 
@@ -488,11 +500,15 @@ void SerialPrintHex32(uint32_t val) {
  * *************************************************************** */
 void SerialPrintData(byte* msg){
   // Calculate pure data length without housekeeping info
-  int data_len=msg[3]-11;     // get packet length, then subtract
-
+  int data_len;
+  if (bus_type == 1) {
+    data_len=msg[len_idx]-14;     // get packet length, then subtract
+  } else {
+    data_len=msg[len_idx]-11;     // get packet length, then subtract
+  }
   // Start indexing where the payload begins
   for(int i=0;i<data_len;i++){
-    SerialPrintHex(msg[9+i]);
+    SerialPrintHex(msg[pl_start+i]);
     Serial.print(F(" "));
   }
 }
@@ -541,8 +557,11 @@ void SerialPrintRAW(byte* msg, byte len){
 char *TranslateAddr(byte addr, char *device){
   switch(addr&0x7F){
     case ADDR_HEIZ: strncpy(device, "HEIZ", 4); break;
+    case ADDR_EM1: strncpy(device, "EM1", 4); break;
+    case ADDR_EM2: strncpy(device, "EM2", 4); break;
     case ADDR_RGT1: strncpy(device, "RGT1", 4); break;
     case ADDR_RGT2: strncpy(device, "RGT2", 4); break;
+    case ADDR_CNTR: strncpy(device, "CNTR", 4); break;
     case ADDR_DISP: strncpy(device, "DISP", 4); break;
     case ADDR_ALL: strncpy(device, "ALL ", 4); break;
     default: sprintf(device, "%02X", addr); break;
@@ -571,8 +590,11 @@ char *TranslateAddr(byte addr, char *device){
 void SerialPrintAddr(byte addr){
   switch(addr&0x7F){
     case ADDR_HEIZ: Serial.print(F("HEIZ")); break;
+    case ADDR_EM1: Serial.print(F("EM1")); break;
+    case ADDR_EM2: Serial.print(F("EM2")); break;
     case ADDR_RGT1: Serial.print(F("RGT1")); break;
     case ADDR_RGT2: Serial.print(F("RGT2")); break;
+    case ADDR_CNTR: Serial.print(F("CNTR")); break;
     case ADDR_DISP: Serial.print(F("DISP")); break;
     case ADDR_ALL: Serial.print(F("ALL ")); break;
     default: SerialPrintHex(addr); break;
@@ -675,9 +697,9 @@ void printLineNumber(uint32_t val) {
 void printBIT(byte *msg,byte data_len){
   char *p=outBuf+outBufLen;
   if(data_len == 2){
-    if(msg[9]==0){
+    if(msg[pl_start]==0){
       for (int i=7;i>=0;i--) {
-        outBufLen+=sprintf(outBuf+outBufLen,"%d",msg[10] >> i & 1);
+        outBufLen+=sprintf(outBuf+outBufLen,"%d",msg[pl_start+1] >> i & 1);
       }
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -705,8 +727,8 @@ void printBIT(byte *msg,byte data_len){
 void printBYTE(byte *msg,byte data_len,const char *postfix){
   char *p=outBuf+outBufLen;
   if(data_len == 2){
-    if(msg[9]==0){
-      outBufLen+=sprintf(outBuf+outBufLen,"%d",msg[10]);
+    if(msg[pl_start]==0){
+      outBufLen+=sprintf(outBuf+outBufLen,"%d",msg[pl_start+1]);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
     }
@@ -738,8 +760,8 @@ void printWORD(byte *msg,byte data_len, long multiplier, const char *postfix){
   char *p=outBuf+outBufLen;
 
   if(data_len == 3){
-    if(msg[9]==0){
-      lval=((long(msg[10])<<8)+long(msg[11])) * multiplier;
+    if(msg[pl_start]==0){
+      lval=((long(msg[pl_start+1])<<8)+long(msg[pl_start+2])) * multiplier;
       outBufLen+=sprintf(outBuf+outBufLen,"%ld",lval);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -772,8 +794,8 @@ void printSINT(byte *msg,byte data_len, long multiplier, const char *postfix){
   char *p=outBuf+outBufLen;
 
   if(data_len == 3){
-    if(msg[9]==0){
-      lval=(((int16_t)(msg[10])<<8) + (int16_t)(msg[11])) * multiplier;
+    if(msg[pl_start]==0){
+      lval=(((int16_t)(msg[pl_start+1])<<8) + (int16_t)(msg[pl_start+2])) * multiplier;
       outBufLen+=sprintf(outBuf+outBufLen,"%d",lval);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -806,8 +828,8 @@ void printDWORD(byte *msg,byte data_len,long divider, const char *postfix){
   char *p=outBuf+outBufLen;
 
   if(data_len == 5){
-    if(msg[9]==0){
-      lval=((long(msg[10])<<24)+(long(msg[11])<<16)+(long(msg[12])<<8)+long(msg[13]))/divider;
+    if(msg[pl_start]==0){
+      lval=((long(msg[pl_start+1])<<24)+(long(msg[pl_start+2])<<16)+(long(msg[pl_start+3])<<8)+long(msg[pl_start+4]))/divider;
       outBufLen+=sprintf(outBuf+outBufLen,"%ld",lval);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -873,8 +895,8 @@ void printFIXPOINT(byte *msg,byte data_len,double divider,int precision,const ch
   char *p=outBuf+outBufLen;
 
   if(data_len == 3){
-    if(msg[9]==0){
-      dval=double((msg[10] << 8) + msg[11]) / divider;
+    if(msg[pl_start]==0){
+      dval=double((msg[pl_start+1] << 8) + msg[pl_start+2]) / divider;
       _printFIXPOINT(dval,precision);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -907,8 +929,8 @@ void printFIXPOINT_DWORD(byte *msg,byte data_len,double divider,int precision,co
   char *p=outBuf+outBufLen;
 
   if(data_len == 5){
-    if(msg[9]==0){
-      dval=double((long(msg[10])<<24)+(long(msg[11])<<16)+(long(msg[12])<<8)+long(msg[13])) / divider;
+    if(msg[pl_start]==0){
+      dval=double((long(msg[pl_start+1])<<24)+(long(msg[pl_start+2])<<16)+(long(msg[pl_start+3])<<8)+long(msg[pl_start+4])) / divider;
       _printFIXPOINT(dval,precision);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -941,8 +963,8 @@ void printFIXPOINT_BYTE(byte *msg,byte data_len,double divider,int precision,con
   char *p=outBuf+outBufLen;
 
   if(data_len == 2){
-    if(msg[9]==0){
-      dval=double((signed char)msg[10]) / divider;
+    if(msg[pl_start]==0){
+      dval=double((signed char)msg[pl_start+1]) / divider;
       _printFIXPOINT(dval,precision);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -975,8 +997,8 @@ void printFIXPOINT_BYTE_US(byte *msg,byte data_len,double divider,int precision,
   char *p=outBuf+outBufLen;
 
   if(data_len == 2){
-    if(msg[9]==0){
-      dval=double(msg[10]) / divider;
+    if(msg[pl_start]==0){
+      dval=double(msg[pl_start+1]) / divider;
       _printFIXPOINT(dval,precision);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -1008,11 +1030,11 @@ void printCHOICE(byte *msg,byte data_len,const char *val0,const char *val1){
   char *p=outBuf+outBufLen;
 
   if(data_len == 2){
-    if(msg[9]==0){
-      if(msg[10]==0){
-        outBufLen+=sprintf(outBuf+outBufLen,"%d - %s",msg[10],val0);
+    if(msg[pl_start]==0){
+      if(msg[pl_start+1]==0){
+        outBufLen+=sprintf(outBuf+outBufLen,"%d - %s",msg[pl_start+1],val0);
       }else{
-        outBufLen+=sprintf(outBuf+outBufLen,"%d - %s",msg[10],val1);
+        outBufLen+=sprintf(outBuf+outBufLen,"%d - %s",msg[pl_start+1],val1);
       }
     }else{
       outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -1088,8 +1110,8 @@ void printDateTime(byte *msg,byte data_len){
   char *p=outBuf+outBufLen;
 
   if(data_len == 9){
-    if(msg[9]==0){
-      outBufLen+=sprintf(outBuf+outBufLen,"%02d.%02d.%d %02d:%02d:%02d",msg[12],msg[11],msg[10]+1900,msg[14],msg[15],msg[16]);
+    if(msg[pl_start]==0){
+      outBufLen+=sprintf(outBuf+outBufLen,"%02d.%02d.%d %02d:%02d:%02d",msg[pl_start+3],msg[pl_start+2],msg[pl_start+1]+1900,msg[pl_start+5],msg[pl_start+6],msg[pl_start+7]);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
     }
@@ -1117,8 +1139,8 @@ void printDate(byte *msg,byte data_len){
   char *p=outBuf+outBufLen;
 
   if(data_len == 9){
-    if(msg[9]==0){
-      outBufLen+=sprintf(outBuf+outBufLen,"%02d.%02d",msg[12],msg[11]);
+    if(msg[pl_start]==0){
+      outBufLen+=sprintf(outBuf+outBufLen,"%02d.%02d",msg[pl_start+3],msg[pl_start+2]);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"---");
     }
@@ -1147,20 +1169,20 @@ void printTimeProg(byte *msg,byte data_len){
 
   if(data_len == 12){
     outBufLen+=sprintf(outBuf+outBufLen,"1. ");
-    if(msg[9]<24){
-      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d - %02d:%02d",msg[9],msg[10],msg[11],msg[12]);
+    if(msg[pl_start]<24){
+      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d - %02d:%02d",msg[pl_start],msg[pl_start+1],msg[pl_start+2],msg[pl_start+3]);
     }else{
       outBufLen+=sprintf(outBuf+outBufLen,"--:-- - --:--");
     }
     outBufLen+=sprintf(outBuf+outBufLen," 2. ");
-    if(msg[13]<24){
-      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d - %02d:%02d",msg[13],msg[14],msg[15],msg[16]);
+    if(msg[pl_start+4]<24){
+      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d - %02d:%02d",msg[pl_start+4],msg[pl_start+5],msg[pl_start+6],msg[pl_start+7]);
     }else{
       outBufLen+=sprintf(outBuf+outBufLen,"--:-- - --:--");
     }
     outBufLen+=sprintf(outBuf+outBufLen," 3. ");
-    if(msg[17]<24){
-      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d - %02d:%02d",msg[17],msg[18],msg[19],msg[20]);
+    if(msg[pl_start+8]<24){
+      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d - %02d:%02d",msg[pl_start+8],msg[pl_start+9],msg[pl_start+10],msg[pl_start+11]);
     }else{
       outBufLen+=sprintf(outBuf+outBufLen,"--:-- - --:--");
     }
@@ -1188,8 +1210,8 @@ void printTime(byte *msg,byte data_len){
   char *p=outBuf+outBufLen;
 
   if(data_len == 3){
-    if(msg[9]==0){
-      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d",msg[10],msg[11]);
+    if(msg[pl_start]==0){
+      outBufLen+=sprintf(outBuf+outBufLen,"%02d:%02d",msg[pl_start+1],msg[pl_start+2]);
     } else {
       outBufLen+=sprintf(outBuf+outBufLen,"--:--");
     }
@@ -1218,8 +1240,8 @@ void printLPBAddr(byte *msg,byte data_len){
   char *p=outBuf+outBufLen;
 
   if(data_len == 2){
-    if(msg[9]==0){   // payload Int8 value
-    outBufLen+=sprintf(outBuf+outBufLen,"%02d.%02d",msg[10]>>4,(msg[10] & 0x0f)+1);
+    if(msg[pl_start]==0){   // payload Int8 value
+    outBufLen+=sprintf(outBuf+outBufLen,"%02d.%02d",msg[pl_start+1]>>4,(msg[pl_start+1] & 0x0f)+1);
   }else{
     outBufLen+=sprintf(outBuf+outBufLen,"---");
   }
@@ -1262,21 +1284,28 @@ char *printTelegram(byte* msg) {
 #endif
 */
   // source
-  SerialPrintAddr(msg[1]); // source address
+  SerialPrintAddr(msg[1+(bus_type*2)]); // source address
   Serial.print(F("->"));
   SerialPrintAddr(msg[2]); // destination address
   Serial.print(F(" "));
   // msg[3] contains the message length, not handled here
-  SerialPrintType(msg[4]); // message type, human readable
+  SerialPrintType(msg[4+(bus_type*4)]); // message type, human readable
   Serial.print(F(" "));
 
   uint32_t cmd;
-  if(msg[4]==TYPE_QUR || msg[4]==TYPE_SET){ //QUERY and SET: byte 5 and 6 are in reversed order
-    cmd=(uint32_t)msg[6]<<24 | (uint32_t)msg[5]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
-  }else{
-    cmd=(uint32_t)msg[5]<<24 | (uint32_t)msg[6]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
+  if (bus_type == 1) {
+    if(msg[8]==TYPE_QUR || msg[8]==TYPE_SET){ //QUERY and SET: byte 5 and 6 are in reversed order
+      cmd=(uint32_t)msg[10]<<24 | (uint32_t)msg[9]<<16 | (uint32_t)msg[11] << 8 | (uint32_t)msg[12];
+    }else{
+      cmd=(uint32_t)msg[9]<<24 | (uint32_t)msg[10]<<16 | (uint32_t)msg[11] << 8 | (uint32_t)msg[12];
+    }
+  } else {
+    if(msg[4]==TYPE_QUR || msg[4]==TYPE_SET){ //QUERY and SET: byte 5 and 6 are in reversed order
+      cmd=(uint32_t)msg[6]<<24 | (uint32_t)msg[5]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
+    }else{
+      cmd=(uint32_t)msg[5]<<24 | (uint32_t)msg[6]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
+    }
   }
-
   // search for the command code in cmdtbl
   int i=0;        // begin with line 0
   boolean known=0;
@@ -1312,7 +1341,8 @@ char *printTelegram(byte* msg) {
     int cat=pgm_read_byte_far(pgm_get_far_address(cmdtbl[0].category) + i * sizeof(cmdtbl[0]));
 //    int cat=pgm_read_byte(&cmdtbl[i].category);
     int len=sizeof(ENUM_CAT);
-    memcpy_P(buffer, &ENUM_CAT,len);
+    memcpy_PF(buffer, pgm_get_far_address(ENUM_CAT), len);
+//    memcpy_P(buffer, &ENUM_CAT,len);
     buffer[len]=0;
     printENUM(buffer,len,cat,0);
     Serial.print(F(" - "));
@@ -1326,17 +1356,24 @@ char *printTelegram(byte* msg) {
     Serial.print(p);
   }
   // decode parameter
-  int data_len=msg[3]-11;
+  int data_len;
+  if (bus_type == 1) {
+    data_len=msg[len_idx]-14;     // get packet length, then subtract
+  } else {
+    data_len=msg[len_idx]-11;     // get packet length, then subtract
+  }
   if(data_len < 0){
     Serial.print(F("len ERROR "));
-    Serial.print(msg[3]);
+    Serial.print(msg[len_idx]);
   }else{
     if(data_len > 0){
       if(known){
-        if(msg[4]==TYPE_ERR){
+        if(msg[4+(bus_type*4)]==TYPE_ERR){
           char *p=outBuf+outBufLen;
-          outBufLen+=sprintf(outBuf+outBufLen,"error %d",msg[9]);
-          if(msg[9]==0x07){
+//          outBufLen+=sprintf(outBuf+outBufLen,"error %d",msg[9]); For truncated error message LPB bus systems
+//          if((msg[9]==0x07 && bus_type==0) || (msg[9]==0x05 && bus_type==1)){
+          outBufLen+=sprintf(outBuf+outBufLen,"error %d",msg[pl_start]);
+          if(msg[pl_start]==0x07){
             outBufLen+=sprintf(outBuf+outBufLen," (parameter not supported)");
           }
           Serial.print(p);
@@ -1470,11 +1507,12 @@ char *printTelegram(byte* msg) {
               break;
             case VT_WEEKDAY: // enum
               if(data_len == 2){
-                if(msg[9]==0){
+                if(msg[pl_start]==0){
                   int len=sizeof(ENUM_WEEKDAY);
+//                  memcpy_PF(buffer, pgm_get_far_address(ENUM_WEEKDAY), len);
                   memcpy_P(buffer, &ENUM_WEEKDAY,len);
                   buffer[len]=0;
-                  printENUM(buffer,len,msg[10],0);
+                  printENUM(buffer,len,msg[pl_start+1],0);
                 }else{
                   Serial.print(F("---"));
                   outBufLen+=sprintf(outBuf+outBufLen,"---");
@@ -1487,16 +1525,16 @@ char *printTelegram(byte* msg) {
               break;
             case VT_ENUM: // enum
               if((data_len == 2 && (dev_id & DEV_FJ_WSK) != dev_id) || (data_len == 3 && (dev_id & DEV_FJ_WSK) == dev_id)){
-                if((msg[9]==0 && data_len==2) || (msg[9]==0 && msg[10]==0 && data_len==3)){
+                if((msg[pl_start]==0 && data_len==2) || (msg[pl_start]==0 && msg[pl_start+1]==0 && data_len==3)){
                   if(pgm_read_word_far(pgm_get_far_address(cmdtbl[0].enumstr) + i * sizeof(cmdtbl[0]))!=0) {
                     int len=pgm_read_word_far(pgm_get_far_address(cmdtbl[0].enumstr_len) + i * sizeof(cmdtbl[0]));
                     memcpy_PF(buffer, pgm_read_word_far(pgm_get_far_address(cmdtbl[0].enumstr) + i * sizeof(cmdtbl[0])),len);
                     buffer[len]=0;
 
                     if (data_len == 2) {
-                      printENUM(buffer,len,msg[10],1);
+                      printENUM(buffer,len,msg[pl_start+1],1);
                     } else {                            // Fujitsu: data_len == 3
-                      printENUM(buffer,len,msg[11],1);
+                      printENUM(buffer,len,msg[pl_start+2],1);
                     }
                   }else{
                     Serial.print(F("no enum str "));
@@ -1528,10 +1566,10 @@ char *printTelegram(byte* msg) {
               break;
             case VT_STRING: // string
               if(data_len > 0){
-                if(msg[9]!=0){
-                  msg[9 + data_len]='\0'; // write terminating zero
-                  Serial.print((char*)&msg[9]);
-                  outBufLen+=sprintf(outBuf+outBufLen,"%s",(char*)&msg[9]);
+                if(msg[pl_start]!=0){
+                  msg[pl_start + data_len]='\0'; // write terminating zero
+                  Serial.print((char*)&msg[pl_start]);
+                  outBufLen+=sprintf(outBuf+outBufLen,"%s",(char*)&msg[pl_start]);
                 } else {
                   Serial.print(F("-"));
                   outBufLen+=sprintf(outBuf+outBufLen,"-");
@@ -1544,10 +1582,11 @@ char *printTelegram(byte* msg) {
               break;
             case VT_ERRORCODE: //  s16
               if(data_len == 3){
-                if(msg[9]==0){
+                if(msg[pl_start]==0){
                   long lval;
-                  lval=(long(msg[10])<<8)+long(msg[11]);
+                  lval=(long(msg[pl_start+1])<<8)+long(msg[pl_start+2]);
                   int len=sizeof(ENUM_ERROR);
+//                  memcpy_PF(buffer, pgm_get_far_address(ENUM_ERROR), len);
                   memcpy_P(buffer, &ENUM_ERROR,len);
                   buffer[len]=0;
                   printENUM(buffer,len,lval,1);
@@ -1590,17 +1629,33 @@ char *printTelegram(byte* msg) {
       }else{
         SerialPrintData(msg);
 //        Serial.println();
-//        SerialPrintRAW(msg,msg[3]);
+//        SerialPrintRAW(msg,msg[len_idx]+bus_type);
         outBufLen+=sprintf(outBuf+outBufLen,"unknown command");
       }
     }
   }
   Serial.println();
   if(verbose){
-    SerialPrintRAW(msg,msg[3]);
+    SerialPrintRAW(msg,msg[len_idx]+bus_type);
     Serial.println();
   }
   return pvalstr;
+}
+
+void printPStr(uint32_t outstr, uint16_t outstr_len) {
+  int htmlbuflen = 100;
+  byte htmllineBuf[htmlbuflen];
+  int i = 0;
+  for (unsigned int x=0;x<outstr_len-1;x++) {
+    htmllineBuf[i] = pgm_read_byte_far(outstr+x);
+    i++;
+    if (i==htmlbuflen) {
+      i=0;
+      client.write(htmllineBuf, htmlbuflen);
+    }
+  }
+  //final packet
+  if (i > 0) client.write(htmllineBuf, i);
 }
 
 /** *****************************************************************
@@ -1616,33 +1671,9 @@ char *printTelegram(byte* msg) {
  *   client object
  * *************************************************************** */
 void webPrintHeader(void){
-  client.println(F("HTTP/1.1 200 OK"));
-  client.println(F("Content-Type: text/html"));
-  client.println();
-  client.println(F("<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\">"));
-  client.println(F("<html>"));
-  client.println(F("<head>"));
-  client.println(F("<meta http-equiv=\"content-type\" content=\"text/html; charset=UTF-8\">"));
-  client.println(F("<title>BSB-LAN Web</title>"));
-  client.println(F("<link rel=\"shortcut icon\" type=\"image/x-icon\" href=\"http://arduino.cc/en/favicon.png\" />"));
-  client.println(F("<style>A:link  {color:blue;text-decoration: none;} A:visited {color:blue;text-decoration: none;} A:hover {color:red;text-decoration: none;background-color:yellow} A:active {color:blue;text-decoration: none;} A:focus {color:red;text-decoration: none;}"));
-  client.println(F("input {width: 100%; box-sizing: border-box;} select {width: 100%;}</style>"));
-  client.println(F("</head>"));
-  client.println(F("<body>"));
-  client.println(F("<script>function set(line,formnr){"));
-  client.println(F("if(isNaN(document.getElementById('value'+formnr).value)==false){"));
-  client.println(F("window.open('S'+line+'='+document.getElementById('value'+formnr).value,'_self');"));
-  client.println(F("}}"));
-  client.println(F("function setbit(line,formnr){"));
-  client.println(F("var x=document.getElementById('value'+formnr); var value=0;"));
-  client.println(F("for (var i=0; i<x.options.length; i++) {"));
-  client.println(F("if(x.options[i].selected){"));
-  client.println(F("value=value&eval(x.options[i].value);"));
-  client.println(F("}}"));
-  client.println(F("window.open('S'+line+'='+value,'_self');"));
-  client.println(F("}</script>"));
-  client.println(F("<font face='Arial'>"));
-  client.print(F("<center><h1><A HREF='/"));
+
+  printPStr(pgm_get_far_address(header_html), sizeof(header_html));
+
 #ifdef PASSKEY
   client.print(PASSKEY);
   client.print(F("/"));
@@ -2281,7 +2312,7 @@ int set(uint16_t line      // the ProgNr of the heater parameter
 #endif
 
   // Expect an acknowledgement to our SET telegram
-  if(msg[4]!=TYPE_ACK){
+  if(msg[4+(bus_type*4)]!=TYPE_ACK){      // msg type at 4 (BSB) or 8 (LPB)
     Serial.println(F("set failed NACK"));
     return 0;
   }
@@ -2359,8 +2390,13 @@ char* query(uint16_t line_start  // begin at this line (ProgNr)
             retry--;          // decrement number of attempts
           }
         } // endwhile, maximum number of retries reached
-        if(retry==0)
-          outBufLen+=sprintf(outBuf+outBufLen,"%d query failed",line);
+        if(retry==0) {
+          if (bus_type == 1 && msg[8] == TYPE_ERR) {
+            outBufLen+=sprintf(outBuf+outBufLen,"error %d",msg[9]);
+          } else {
+            outBufLen+=sprintf(outBuf+outBufLen,"%d query failed",line);
+          }
+        }
       }else{
         //Serial.println(F("unknown command"));
         //if(line_start==line_end) outBufLen+=sprintf(outBuf+outBufLen,"%d unknown command",line);
@@ -2372,7 +2408,7 @@ char* query(uint16_t line_start  // begin at this line (ProgNr)
     if(outBufLen>0){
       if (!no_print) {  // display result in web client
         formnr++;
-        if (msg[4] == TYPE_ERR) {
+        if (msg[4+(bus_type*4)] == TYPE_ERR) {
           client.println(F("<tr style='color: #7f7f7f'><td>"));
         } else {
           client.println(F("<tr><td>"));
@@ -2385,11 +2421,16 @@ char* query(uint16_t line_start  // begin at this line (ProgNr)
         uint32_t enumstr = pgm_read_word_far(pgm_get_far_address(cmdtbl[0].enumstr) + i * sizeof(cmdtbl[0]));
 
         // dump data payload for unknown types
-        if (type == VT_UNKNOWN && msg[4] != TYPE_ERR) {
-          int data_len=msg[3]-11;
+        if (type == VT_UNKNOWN && msg[4+(bus_type*4)] != TYPE_ERR) {
+          int data_len;
+          if (bus_type == 1) {
+            data_len=msg[len_idx]-14;     // get packet length, then subtract
+          } else {
+            data_len=msg[len_idx]-11;     // get packet length, then subtract
+          }
           for (i=0;i<=data_len-1;i++) {
-            if (msg[9+i] < 16) client.print(F("0"));  // add a leading zero to single-digit values
-            client.print(msg[9+i], HEX);
+            if (msg[pl_start+i] < 16) client.print(F("0"));  // add a leading zero to single-digit values
+            client.print(msg[pl_start+i], HEX);
           }
         }
 
@@ -2496,6 +2537,55 @@ char *GetDateTime(char date[]){
 }
 
 /** *****************************************************************
+ *  Function:  SetDevId()
+ *  Does:      Sets device_id and dev_id
+ *
+ * Pass parameters:
+ *   none
+ * Parameters passed back:
+ *   none
+ * Function value returned:
+ *   none
+ * Global resources used:
+ *   none
+ * *************************************************************** */
+
+void SetDevId() {
+  uint8_t family=0;
+  boolean known=0;
+
+  if (bus_type == 1) {
+    device_id = 1;
+  } else {
+    if (fixed_device_id < 1) {
+      dev_id = 0;
+      device_id = strtod(query(6225,6225,1),NULL);
+    } else {
+      device_id = fixed_device_id;
+    }
+  }
+  int i=0;
+  family=pgm_read_byte_far(pgm_get_far_address(dev_tbl[0].dev_family) + i * sizeof(dev_tbl[0]));
+  while(family!=DEV_NONE){
+    if(family == device_id){
+      known=1;
+      break;
+    }
+    i++;
+    family=pgm_read_byte_far(pgm_get_far_address(dev_tbl[0].dev_family) + i * sizeof(dev_tbl[0]));
+  }
+  if (!known){
+    dev_id=DEV_ALL;
+  } else {
+    dev_id=pgm_read_dword_far(pgm_get_far_address(dev_tbl[0].dev_bit_id) + i * sizeof(dev_tbl[0]));
+  }
+  Serial.print(F("Device family: "));
+  Serial.println(device_id);
+  Serial.print(F("Device ID: "));
+  Serial.println(dev_id);
+}
+
+/** *****************************************************************
  *  Function:  SetDateTime()
  *  Does:      Sets date/time based on heating system's clock
  *
@@ -2516,7 +2606,11 @@ void SetDateTime(){
   findLine(0,0,&c);
   if(c!=CMD_UNKNOWN){     // send only valid command codes
     if(bus.Send(TYPE_QUR, c, rx_msg, tx_msg)){
-      setTime(rx_msg[14], rx_msg[15], rx_msg[16], rx_msg[12], rx_msg[11], rx_msg[10]+1900);
+      if (bus_type == 1) {
+        setTime(rx_msg[18], rx_msg[19], rx_msg[20], rx_msg[16], rx_msg[15], rx_msg[14]+1900);
+      } else {
+        setTime(rx_msg[14], rx_msg[15], rx_msg[16], rx_msg[12], rx_msg[11], rx_msg[10]+1900);
+      }
     }
   }
 }
@@ -2552,10 +2646,10 @@ void LogTelegram(byte* msg){
 
   if (log_parameters[0] == 30000) {
 
-    if(msg[4]==TYPE_QUR || msg[4]==TYPE_SET){ //QUERY and SET: byte 5 and 6 are in reversed order
-      cmd=(uint32_t)msg[6]<<24 | (uint32_t)msg[5]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
+    if(msg[4+(bus_type*4)]==TYPE_QUR || msg[4+(bus_type*4)]==TYPE_SET){ //QUERY and SET: byte 5 and 6 are in reversed order
+      cmd=(uint32_t)msg[6+(bus_type*4)]<<24 | (uint32_t)msg[5+(bus_type*4)]<<16 | (uint32_t)msg[7+(bus_type*4)] << 8 | (uint32_t)msg[8+(bus_type*4)];
     }else{
-      cmd=(uint32_t)msg[5]<<24 | (uint32_t)msg[6]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
+      cmd=(uint32_t)msg[5+(bus_type*4)]<<24 | (uint32_t)msg[6+(bus_type*4)]<<16 | (uint32_t)msg[7+(bus_type*4)] << 8 | (uint32_t)msg[8+(bus_type*4)];
     }
     // search for the command code in cmdtbl
     c=pgm_read_dword_far(pgm_get_far_address(cmdtbl[0].cmd) + i * sizeof(cmdtbl[0]));
@@ -2574,7 +2668,7 @@ void LogTelegram(byte* msg){
     }
 
     if (log_unknown_only == 0 || (log_unknown_only == 1 && known == 0)) {
-      if (log_bc_only == 0 || (log_bc_only == 1 && msg[2] == ADDR_ALL)) {
+      if (log_bc_only == 0 || (log_bc_only == 1 && ((msg[2]==ADDR_ALL && bus_type==0) || (msg[2]>=0xF0 && bus_type==1)))) {
         dataFile = SD.open("datalog.txt", FILE_WRITE);
         if (dataFile) {
           dataFile.print(millis());
@@ -2593,14 +2687,14 @@ void LogTelegram(byte* msg){
             dataFile.print(line);             // the ProgNr
           }
           dataFile.print(F(";"));
-          dataFile.print(TranslateAddr(msg[1], device));
+          dataFile.print(TranslateAddr(msg[1+(bus_type*2)], device));
           dataFile.print(F("->"));
           dataFile.print(TranslateAddr(msg[2], device));
           dataFile.print(F(" "));
-          dataFile.print(TranslateType(msg[4], device));
+          dataFile.print(TranslateType(msg[4+(bus_type*4)], device));
           dataFile.print(F(";"));
 
-          for(int i=0;i<msg[3];i++){
+          for(int i=0;i<msg[len_idx]+bus_type;i++){
             if (i > 0) {
               dataFile.print(F(" "));
             }
@@ -2610,7 +2704,7 @@ void LogTelegram(byte* msg){
 
           // additionally log data payload in addition to raw messages when data payload is max. 32 Bit
 
-          if ((msg[4] == TYPE_INF || msg[4] == TYPE_SET || msg[4] == TYPE_ANS) && msg[3] < 17) {
+          if ((msg[4+(bus_type*4)] == TYPE_INF || msg[4+(bus_type*4)] == TYPE_SET || msg[4+(bus_type*4)] == TYPE_ANS) && msg[len_idx] < 17+bus_type) {
             dataFile.print(F(";"));
             i=0;
             while(type!=VT_UNKNOWN){
@@ -2621,12 +2715,20 @@ void LogTelegram(byte* msg){
               i++;
               type=pgm_read_byte_far(pgm_get_far_address(divtbl[0].type) + i * sizeof(divtbl[0]));
             }
-            data_len=msg[3]-11;
+            if (bus_type == 1) {
+              data_len=msg[1]-14;
+            } else {
+              data_len=msg[3]-11;
+            }
             dval = 0;
             divisor=pgm_read_float_far(pgm_get_far_address(divtbl[0].divisor) + i * sizeof(divtbl[0]));
             precision=pgm_read_byte_far(pgm_get_far_address(divtbl[0].precision) + i * sizeof(divtbl[0]));
-            for (i=0;i<data_len-1;i++) {
-              dval = dval + long(msg[10+i-(msg[4]==TYPE_INF)]<<((data_len-2-i)*8));
+            for (i=0;i<data_len-1+bus_type;i++) {
+              if (bus_type == 1) {
+                dval = dval + long(msg[10+i-(msg[4]==TYPE_INF)]<<((data_len-2-i)*8));
+              } else {
+                dval = dval + long(msg[14+i-(msg[8]==TYPE_INF)]<<((data_len-2-i)*8));
+              }
             }
             dval = dval / divisor;
 /*
@@ -2898,8 +3000,12 @@ void Ipwe() {
 
 char *lookup_descr(uint16_t line) {
   int i=findLine(line,0,NULL);
-  strcpy_PF(buffer, pgm_read_word_far(pgm_get_far_address(cmdtbl[0].desc) + i * sizeof(cmdtbl[0])));
+  if (i<0) {                    // Not found (for this heating system)?
+    strcpy_P(buffer, STR99999); // Unknown command has line no. 10999
+  } else {
+    strcpy_PF(buffer, pgm_read_word_far(pgm_get_far_address(cmdtbl[0].desc) + i * sizeof(cmdtbl[0])));
 //  strcpy_P(buffer, (char*)pgm_read_word(&(cmdtbl[i].desc)));
+  }
   return buffer;
 }
 
@@ -2931,9 +3037,11 @@ void loop() {
   // interface.
   // Separate telegrams after a pause of more than one character time.
   if(monitor){
-    bus.Monitor(msg);
+    boolean busmsg=bus.Monitor(msg);
 #ifdef LOGGER
-    LogTelegram(msg);
+    if (busmsg==true) {
+      LogTelegram(msg);
+    }
 #endif
   }else{
     // Listen for incoming messages, identified them by their magic byte.
@@ -2947,7 +3055,7 @@ void loop() {
 #endif
       }
       // Is this a broadcast message?
-      if(msg[2]==ADDR_ALL && msg[4]==TYPE_INF){ // handle broadcast messages
+      if(((msg[2]==ADDR_ALL && bus_type==0) || (msg[2]>=0xF0 && bus_type==1)) && msg[4+(bus_type*4)]==TYPE_INF){ // handle broadcast messages
       // Decode the rcv telegram and send it to the PC serial interface
         if (!verbose) {        // don't log twice if in verbose mode, but log broadcast messages also in non-verbose mode
           printTelegram(msg);
@@ -2959,10 +3067,9 @@ void loop() {
         // Filter Brenner Status messages (attention: partially undocumented enum values)
 
         uint32_t cmd;
-        cmd=(uint32_t)msg[5]<<24 | (uint32_t)msg[6]<<16 | (uint32_t)msg[7] << 8 | (uint32_t)msg[8];
-
-        if(cmd==0x0500006C) {   // set Time from BC
-          setTime(msg[14], msg[15], msg[16], msg[12], msg[11], msg[10]+1900);
+        cmd=(uint32_t)msg[5+(bus_type*4)]<<24 | (uint32_t)msg[6+(bus_type*4)]<<16 | (uint32_t)msg[7+(bus_type*4)] << 8 | (uint32_t)msg[8+(bus_type*4)];
+        if(cmd==0x0500006C) {   // set Time from BC, same CommandID for BSB and LPB
+          setTime(msg[pl_start+5], msg[pl_start+6], msg[pl_start+7], msg[pl_start+3], msg[pl_start+2], msg[pl_start+1]+1900);
         }
 
         if(cmd==0x31000212) {    // TWW Status Elco / Brötje SOB
@@ -2990,9 +3097,9 @@ void loop() {
 
         if(cmd==0x05000213) {     // Brennerstatus; CommandID 0x053d0f66 was suggested at some point as well, but so far has not been identified in one of the heating systems
           Serial.print(F("INF: Brennerstatus: "));
-          Serial.println(msg[9]);      // first payload byte
+          Serial.println(msg[pl_start]);      // first payload byte
 
-          if(msg[9]==0x04) {
+          if(msg[pl_start]==0x04) {
             if(brenner_start==0){        // has not been timed
               brenner_start=millis();   // keep current timestamp
               brenner_count++;          // increment number of starts
@@ -3138,7 +3245,7 @@ void loop() {
         }
 
         // Answer to unknown requests
-        if(!isdigit(p[1]) && strchr("ABCDEGHIKLMORSTVXY",p[1])==NULL){
+        if(!isdigit(p[1]) && strchr("ABCDEGHIKLMOPRSTVXY",p[1])==NULL){
           webPrintHeader();
           webPrintFooter();
           break;
@@ -3274,7 +3381,8 @@ void loop() {
           //list categories
           webPrintHeader();
           int len=sizeof(ENUM_CAT);
-          memcpy_P(buffer, &ENUM_CAT,len);
+          memcpy_PF(buffer, pgm_get_far_address(ENUM_CAT), len);
+//          memcpy_P(buffer, &ENUM_CAT,len);
           buffer[len]=0;
           client.print(F("<a href='/"));
           #ifdef PASSKEY
@@ -3405,11 +3513,11 @@ void loop() {
           break;
         }
 
-#ifdef DEBUG
         if(p[1]=='Y'){
+#ifdef DEBUG
           webPrintHeader();
           uint8_t type = strtol(&p[2],NULL,16);
-          uint32_t c = (uint32_t)strtol(&p[5],NULL,16);
+          uint32_t c = (uint32_t)strtoul(&p[5],NULL,16);
           if(!bus.Send(type, c, msg, tx_msg)){
             Serial.println(F("bus send failed"));  // to PC hardware serial I/F
           }else{
@@ -3428,61 +3536,26 @@ void loop() {
             client.println(outBuf);
             client.println(F("<br>"));
           }
-          for (int i=0;i<tx_msg[3];i++) {
+          for (int i=0;i<tx_msg[len_idx]+bus_type;i++) {
             if (tx_msg[i] < 16) client.print(F("0"));  // add a leading zero to single-digit values
             client.print(tx_msg[i], HEX);
             client.print(F(" "));
           }
           client.println(F("<br>"));
-          for (int i=0;i<msg[3];i++) {
+          for (int i=0;i<msg[len_idx]+bus_type;i++) {
             if (msg[i] < 16) client.print(F("0"));  // add a leading zero to single-digit values
             client.print(msg[i], HEX);
             client.print(F(" "));
           }
           webPrintFooter();
+#endif
           break;
         }
-#endif
         
         if(p[1]=='O') {   // display URL command list
           webPrintHeader();
-#ifdef LANG_DE
-          client.print(F(" <p>Erweiterte Befehle:"));
-          client.print(F(" <table>"));
-          client.println(F(" <tr><td valign=top>/K</td><td>Alle verfügbaren Kategorien auflisten.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Kx</td><td>Alle Werte von Kategorie x abfragen.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/x-y</td><td>Alle Werte eines Zeilenbereichs abfragen (von Zeile x bis Zeile y).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Sx=v</td><td>Setze Wert v (value) für den Parameter x (Leerzeichen nach = deaktiviert den Wert).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Ix=v</td><td>Sende eine INF Nachricht für den Parameter x mit dem Wert v.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Ex</td><td>Alle enum-Werte für Parameter x auflisten.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Rx</td><td>Frage den Reset-Wert für Parameter x ab.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Vn</td><td>Setze den Verbositäts-Level auf n.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Mn</td><td>Bus-Monitor aktivieren/deaktivieren (n=0 deaktivieren, n=1 aktivieren).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Gxx</td><td>Abfragen des GPIO Pins xx.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Gxx=y</td><td>Setzen des GPIO Pins xx auf high (y=1) oder low (y=0).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/A</td><td>24h-Durchschnittswerte von ausgewählten Parametern anzeigen (in BSB_lan_config.h definieren).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/A=x,y,z</td><td>Ändern der 24h-Durchschnittswerte in x,y,z (bis zu 20 Parameter).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/B</td><td>Anzeige der akkumulierten Broadcast-Telegramme zu Brenner- und TWW-Aktivitäten.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/B0</td><td>Zurücksetzen der akkumulierten Broadcast-Telegramme.</td></tr>"));
-#else
-          client.print(F(" <p>Advanced commands:"));
-          client.print(F(" <table>"));
-          client.println(F(" <tr><td valign=top>/K</td><td>List available categories.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Kx</td><td>Query all values in category x.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/x-y</td><td>Query all values from line x up to line y.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Sx=v</td><td>Set value v for line x and query the new value afterwards (empty string after = disables the value).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Ix=v</td><td>Send INF message for command in line x with value v.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Ex</td><td>List enum values for line x.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Rx</td><td>Query reset value for line x.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Vn</td><td>Set verbosity level for serial output to n.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Mn</td><td>Activate/deactivate monitor functionality (n=0 disable, n=1 enable).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Gxx</td><td>Query GPIO pin xx.</td></tr>"));
-          client.println(F(" <tr><td valign=top>/Gxx=y</td><td>Set GPIO pin xx to high (y=1) or low (y=0).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/A</td><td>Show 24h averages of selected parameters (define in BSB_lan_config.h).</td></tr>"));
-          client.println(F(" <tr><td valign=top>/A=x,y,z</td><td>Change 24h averages parameters to x,y,z (up to 20).</td></tr>"));
-          client.println(F(" <tr bgcolor=#f0f0f0><td valign=top>/B</td><td bgcolor=#f0f0f0>Query accumulated broadcast telegrams of burner and hot water activity.</td></tr>"));
-          client.println(F(" <tr bgcolor=#f0f0f0><td valign=top>/B0</td><td bgcolor=#f0f0f0>Reset accumulated broadcast telegrams.</td></tr>"));
-#endif
+
+          printPStr(pgm_get_far_address(url_command_html), sizeof(url_command_html));
 
 #ifndef ONE_WIRE_BUS
 #ifdef LANG_DE
@@ -3597,19 +3670,9 @@ void loop() {
           } else if (p[2]=='G') {
             webPrintHeader();
       	    client.println(F("<A HREF='D'>Download Data</A><div align=center></div>"));
-            int htmlbuflen = 100;
-            byte htmllineBuf[htmlbuflen];
-            int i = 0;
-            for (unsigned int x=0;x<graph_html_len;x++) {
-              htmllineBuf[i] = pgm_read_byte_far(pgm_get_far_address(graph_html)+x);
-              i++;
-              if (i==htmlbuflen) {
-                i=0;
-                client.write(htmllineBuf, htmlbuflen);
-              }
-            }
-            //final packet
-            if (i > 0) client.write(htmllineBuf, i);
+
+            printPStr(pgm_get_far_address(graph_html), sizeof(graph_html));
+
             webPrintFooter();
           } else {  // dump datalog file
             client.println(F("HTTP/1.1 200 OK"));
@@ -3678,6 +3741,13 @@ void loop() {
           client.print(F("RAM: "));
           client.print(freeRam());
           client.println(F("Bytes <BR>"));
+          client.print(F("Bus-System: "));
+          if (bus_type == 1) {
+            client.print(F("LPB"));
+          } else {
+            client.print(F("BSB"));
+          }
+          client.println(F("<BR>"));
 #ifdef LANG_DE
           client.print(F("Monitor Modus: "));
 #else
@@ -3930,9 +4000,27 @@ void loop() {
           webPrintFooter();
           break;
         }
-#ifdef RESET
+        if (p[1]=='P') {
+          webPrintHeader();
+          client.print(F("Bus-System: "));
+          if (p[2]=='1') {
+            bus_type=bus.setBusType(BUS_LPB);
+            len_idx = 1;
+            pl_start = 13;
+            client.println(F("LPB"));
+          } else {
+            bus_type=bus.setBusType(BUS_BSB);
+            len_idx = 3;
+            pl_start = 9;
+            client.println(F("BSB"));
+          }
+          SetDevId();
+          webPrintFooter();
+          break;
+        }
         if (p[1]=='X'){           // Reset Arduino
-        webPrintHeader();
+#ifdef RESET
+          webPrintHeader();
           client.println(F("Reset..."));
           webPrintFooter();
           client.stop();
@@ -3944,8 +4032,9 @@ void loop() {
 #endif
           asm volatile ("  jmp 0");
           while (1==1) {}
-        }
 #endif
+          break;
+        }
         // print queries
         webPrintHeader();
         char* range;
@@ -4268,7 +4357,7 @@ void loop() {
           if (log_parameters[i] >= 20200 && log_parameters[i] < 20300) {
             int log_sensor = log_parameters[i] - 20200;
             sensors.requestTemperatures(); // Send the command to get temperatures
-            float t=sensors.getTempCByIndex(i);
+            float t=sensors.getTempCByIndex(log_sensor);
             dataFile.print(F("Temperature "));
             dataFile.print(log_sensor);
             dataFile.print(F(";"));
@@ -4362,9 +4451,14 @@ void loop() {
  * *************************************************************** */
 void setup() {
 
-  uint8_t family=0;
-  boolean known=0;
-  
+  if (bus_type == 0) {
+    len_idx = 3;
+    pl_start = 9;
+  } else {
+    len_idx = 1;
+    pl_start = 13;
+  }
+
   // The computer hardware serial interface #0:
   //   115,800 bps, 8 data bits, no parity
   Serial.begin(115200, SERIAL_8N1); // hardware serial interface #0
@@ -4474,27 +4568,6 @@ void setup() {
   SetDateTime();
   
 // receive device_id (Gerätefamilie) from heating system
-  if (device_id < 1) {
-    device_id = strtod(query(6225,6225,1),NULL);
-  }
-  Serial.print(F("Device family: "));
-  Serial.println(device_id);
-  int i=0;
-  family=pgm_read_byte_far(pgm_get_far_address(dev_tbl[0].dev_family) + i * sizeof(dev_tbl[0]));
-  while(family!=DEV_NONE){
-    if(family == device_id){
-      known=1;
-      break;
-    }
-    i++;
-    family=pgm_read_byte_far(pgm_get_far_address(dev_tbl[0].dev_family) + i * sizeof(dev_tbl[0]));
-  }
-  if (!known){
-    dev_id=DEV_ALL;
-  } else {
-    dev_id=pgm_read_dword_far(pgm_get_far_address(dev_tbl[0].dev_bit_id) + i * sizeof(dev_tbl[0]));
-  }
-  Serial.print(F("Device ID: "));
-  Serial.println(dev_id);
+  SetDevId();
 }
 
